@@ -152,18 +152,29 @@ const float PI = 3.141592653589793;
 
 float clamp01(float x) { return max(0.0, min(1.0, x)); } // avoids clamp() overload ambiguity
 
-vec3 skyColor(vec3 dir) {
+vec3 skyColor(vec3 dir, float lensStrength) {
   dir = normalize(dir);
+  lensStrength = clamp01(lensStrength);
 
   if (uSkyMode == 1) {
     float lon = atan(dir.z, dir.x);                  // -pi..pi
     float lat = asin(max(-1.0, min(1.0, dir.y)));    // -pi/2..pi/2
     vec2 uv = vec2(lon/(2.0*PI)+0.5, lat/PI+0.5);
 
-    float gx = abs(fract(uv.x * 24.0) - 0.5);
-    float gy = abs(fract(uv.y * 12.0) - 0.5);
-    float line = smoothstep(0.02, 0.0, min(gx, gy));
-    return vec3(0.02) + vec3(0.9) * line;
+    // Stronger apparent grid distortion for rays that passed closer to the horizon.
+    float stretchX = 1.0 + 2.8 * lensStrength * lensStrength;
+    float stretchY = 1.0 + 1.2 * lensStrength;
+    uv = (uv - 0.5) * vec2(stretchX, stretchY) + 0.5;
+
+    vec2 gridScale = vec2(24.0, 12.0) * (1.0 + 2.2 * lensStrength);
+    float gx = abs(fract(uv.x * gridScale.x) - 0.5);
+    float gy = abs(fract(uv.y * gridScale.y) - 0.5);
+
+    float lineW = mix(0.02, 0.006, lensStrength);
+    float line = smoothstep(lineW, 0.0, min(gx, gy));
+    vec3 bg = vec3(0.02);
+    vec3 fg = vec3(0.9, 0.92, 0.96) * (1.0 + 0.35 * lensStrength);
+    return bg + fg * line;
   }
 
   float t = clamp01(dir.y*0.5 + 0.5);
@@ -173,6 +184,11 @@ vec3 skyColor(vec3 dir) {
   float star = smoothstep(0.9985, 1.0, h);
   col += star * vec3(2.0);
   return col;
+}
+
+// Wrapper to preserve old call sites (e.g. skyColor(v))
+vec3 skyColor(vec3 dir) {
+  return skyColor(dir, 0.0);
 }
 
 bool segmentHitsDisk(vec3 p0, vec3 p1, out vec3 hitPos, out float hitT) {
@@ -256,13 +272,13 @@ vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
   vec3 tangent = normalize(vec3(-p.z, 0.0, p.x));
 
   // "Kepler-ish" speed, clamped
-  float beta  = clamp01(sqrt(M / max(r, 1e-4)) * 0.55) * 0.7; // 0..0.7
+  float beta  = clamp01(sqrt(M / max(r, 1e-4)) * 0.68) * 0.82; // up to ~0.82
   float gamma = inversesqrt(1.0 - beta*beta);
 
   // segDir points along the ray as we step outward; direction to camera is -segDir
   float mu  = dot(tangent, normalize(-segDir));
   float dop = 1.0 / (gamma * (1.0 - beta * mu));
-  float beam = pow(dop, 3.0);
+  float beam = pow(max(dop, 0.35), 3.5);
 
   // mild dimming near horizon (artistic)
   float rs = 2.0 * M;
@@ -305,6 +321,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
   float phi = 0.0;
 
   float rPrev = rObs;
+  float minR = rObs;
   vec3 posPrev = (a*cos(phi) + b*sin(phi)) * rPrev;
 
   for (int i = 0; i < uMaxSteps; i++) {
@@ -336,9 +353,13 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     p   += (h/6.0) * (k1_p + 2.0*k2_p + 2.0*k3_p + k4_p);
     phi += h;
 
-    if (u <= 0.0) return vec4(skyColor(v), 1.0);
+    if (u <= 0.0) {
+      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M));
+      return vec4(skyColor(v, lensStrength), 1.0);
+    }
 
     float rNow = 1.0 / u;
+    minR = min(minR, rNow);
     vec3 posNow = (a*cos(phi) + b*sin(phi)) * rNow;
 
     vec3 planetCenter = vec3(
@@ -374,7 +395,8 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
       float dx = dr_dphi * c + rNow * (-s);
       float dy = dr_dphi * s + rNow * ( c);
       vec3 dirOut = normalize(a * dx + b * dy);
-      return vec4(skyColor(dirOut), 1.0);
+      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M));
+      return vec4(skyColor(dirOut, lensStrength), 1.0);
     }
   }
 
@@ -493,7 +515,7 @@ int main() {
   double lastT = glfwGetTime();
 
   // Scene params
-  const float M = 1.0f;
+  const float M = 1.15f;
 
   while (!glfwWindowShouldClose(win)) {
     glfwPollEvents();
