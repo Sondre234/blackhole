@@ -63,9 +63,10 @@ static GLuint linkProgram(const std::vector<GLuint>& shaders) {
   return p;
 }
 
-// ------------------------- Free-fly camera -------------------------
-static float gCamX = 0.0f, gCamY = 0.35f, gCamZ = 12.0f;
-static float gYaw = -90.0f, gPitch = 0.0f;
+// ------------------------- Camera -------------------------
+static float gCamX = 0.0f, gCamY = 4.6f, gCamZ = 22.0f;
+static float gYaw = -90.0f, gPitch = -12.0f;
+static bool  gLockCamera = true;
 static float gLastX = 0.0f, gLastY = 0.0f;
 static bool  gFirstMouse = true;
 static float gMouseSens = 0.08f;
@@ -77,6 +78,8 @@ static float gTimeScale = 1.0f;
 static bool  gResetAccum = true;
 
 static void mouseCallback(GLFWwindow*, double xpos, double ypos) {
+  if (gLockCamera) return;
+
   if (gFirstMouse) {
     gLastX = (float)xpos;
     gLastY = (float)ypos;
@@ -176,6 +179,7 @@ uniform float uDiskOuterR;
 uniform float uDiskHalfThick;
 uniform float uDiskBoost;
 uniform int   uSkyMode;        // 0=stars, 1=grid
+uniform vec3  uLightDir;       // moving directional key light
 
 const float PI = 3.141592653589793;
 
@@ -504,11 +508,11 @@ float diskFlux(float r, float rin) {
 
 vec3 bbApprox(float t) {
   t = clamp01(t);
-  vec3 cool = vec3(0.8, 0.25, 0.08);
-  vec3 mid  = vec3(1.6, 0.9,  0.35);
-  vec3 hot  = vec3(2.2, 2.2,  2.6);
-  vec3 a = mix(cool, mid, smoothstep(0.0, 0.6, t));
-  return mix(a, hot, smoothstep(0.55, 1.0, t));
+  vec3 cool = vec3(0.10, 0.015, 0.005);
+  vec3 mid  = vec3(0.90, 0.18, 0.03);
+  vec3 hot  = vec3(2.00, 0.62, 0.10);
+  vec3 a = mix(cool, mid, smoothstep(0.0, 0.62, t));
+  return mix(a, hot, smoothstep(0.58, 1.0, t));
 }
 
 float gravFactorKerr(float r, float M, float a) {
@@ -523,9 +527,14 @@ vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
   float rin = uDiskInnerR;
   float F = diskFlux(r, rin);
   float T = pow(F, 0.25);
-  T = clamp(T * 2.2, 0.0, 1.0);
+  T = clamp(T * 1.55, 0.0, 1.0);
 
   vec3 col = bbApprox(T);
+
+  float rinN = r / max(rin, 1e-4);
+  float innerRim = 1.0 + 1.4 * exp(-pow((rinN - 1.25) / 0.33, 2.0));
+  float outerFalloff = exp(-0.11 * max(r - rin, 0.0));
+  col *= innerRim * outerFalloff;
 
   // Spin-influenced Keplerian proxy: Omega ~ 1 / (r^(3/2) + a)
   float Omega = 1.0 / (pow(max(r, 1e-3), 1.5) + a);
@@ -550,7 +559,12 @@ vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
   float cosi = clamp(dot(n, normalize(-segDir)), 0.0, 1.0);
   float limb = 0.55 + 0.45*cosi;
 
-  col *= beam * limb;
+  // moving key-light sweep across the disk so accretion structure is easier to read
+  vec2 pDir = normalize(p.xz + vec2(1e-6));
+  vec2 lDir = normalize(uLightDir.xz + vec2(1e-6));
+  float lightSweep = 0.72 + 0.28*pow(clamp(0.5 + 0.5*dot(pDir, lDir), 0.0, 1.0), 1.0);
+
+  col *= beam * limb * lightSweep;
 
   // subtle texture structure
   float ang = atan(p.z, p.x);
@@ -622,7 +636,20 @@ vec3 traceKerr(vec3 camPos, vec3 rayDir) {
       float rph_m = photonRadiusEq(M, a, -1.0);
       float d = min(abs(rMin - rph_p), abs(rMin - rph_m));
       float glow = exp(-d / (0.18 * M));
-      base += glow * vec3(0.50, 0.70, 1.10) * 0.35;
+      base += glow * vec3(0.30, 0.48, 0.95) * 0.24;
+
+      // Keep silhouette legible, but avoid flattening everything around it.
+      float shadowEdge = smoothstep(2.1*M, 3.4*M, rMin);
+      base *= mix(0.45, 1.0, shadowEdge);
+      float rim = exp(-pow((rMin - 2.9*M) / (0.34*M), 2.0));
+      base += rim * vec3(1.00, 0.45, 0.12) * 0.20;
+
+      float dArc = min(abs(rMin - rph_p), abs(rMin - rph_m));
+      float ringBand = exp(-pow(dArc / (0.38*M), 2.0));
+      float upperArc = smoothstep(0.0, 0.33, dirOut.y) * ringBand;
+      float lowerArc = smoothstep(0.0, 0.42, -dirOut.y) * ringBand;
+      base += upperArc * vec3(1.22, 0.58, 0.16) * 0.46;
+      base += lowerArc * vec3(1.00, 0.42, 0.12) * 0.26;
 
       float pole = pow(abs(dirOut.y), 10.0);
       base += pole * (0.06 + 0.05*sin(uTime*3.0)) * vec3(0.5, 0.7, 1.2);
@@ -807,7 +834,7 @@ int main() {
   glfwSwapInterval(1);
 
   glfwSetCursorPosCallback(win, mouseCallback);
-  glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+  glfwSetInputMode(win, GLFW_CURSOR, gLockCamera ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
 
   if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) die("Failed to init GLAD");
 
@@ -858,6 +885,7 @@ int main() {
   GLint uDiskHalfThick= ul(compProg, "uDiskHalfThick");
   GLint uDiskBoost    = ul(compProg, "uDiskBoost");
   GLint uSkyMode      = ul(compProg, "uSkyMode");
+  GLint uLightDir     = ul(compProg, "uLightDir");
   GLint uPrevAccumLoc = ul(compProg, "uPrevAccum");
 
   // Downsample uniforms
@@ -897,12 +925,12 @@ int main() {
   float a = 0.75f * M;
 
   // Bloom knobs
-  float bloomThreshold = 1.25f;
-  float bloomStrength  = 0.85f;
-  float exposure       = 1.05f;
+  float bloomThreshold = 1.90f;
+  float bloomStrength  = 0.28f;
+  float exposure       = 0.82f;
 
   // Sky mode toggle
-  int skyMode = 1; // grid by default
+  int skyMode = 0; // stars by default
 
   while (!glfwWindowShouldClose(win)) {
     glfwPollEvents();
@@ -979,12 +1007,14 @@ int main() {
 
     float step = gMoveSpeed * dt;
 
-    if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) { gCamX += fx*step; gCamY += fy*step; gCamZ += fz*step; }
-    if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) { gCamX -= fx*step; gCamY -= fy*step; gCamZ -= fz*step; }
-    if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) { gCamX -= rx*step; gCamY -= ry*step; gCamZ -= rz*step; }
-    if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) { gCamX += rx*step; gCamY += ry*step; gCamZ += rz*step; }
-    if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) { gCamY -= step; }
-    if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) { gCamY += step; }
+    if (!gLockCamera) {
+      if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) { gCamX += fx*step; gCamY += fy*step; gCamZ += fz*step; }
+      if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) { gCamX -= fx*step; gCamY -= fy*step; gCamZ -= fz*step; }
+      if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) { gCamX -= rx*step; gCamY -= ry*step; gCamZ -= rz*step; }
+      if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) { gCamX += rx*step; gCamY += ry*step; gCamZ += rz*step; }
+      if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) { gCamY -= step; }
+      if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) { gCamY += step; }
+    }
 
     if (cameraChanged()) {
       gResetAccum = true;
@@ -998,7 +1028,7 @@ int main() {
     GLuint prevAccum  = (gFrame % 2 == 0) ? accumB : accumA;
 
     float rin  = kerrISCO(M, a);
-    float rout = 22.0f * M;
+    float rout = 12.0f * M;
 
     // -------------------- Compute pass --------------------
     glUseProgram(compProg);
@@ -1010,7 +1040,7 @@ int main() {
 
     glUniform3f(uCamPos, pos[0], pos[1], pos[2]);
     glUniformMatrix3fv(uCamBasis, 1, GL_FALSE, basis);
-    glUniform1f(uFovY, 55.0f);
+    glUniform1f(uFovY, 34.0f);
 
     glUniform1f(uM, M);
     glUniform1f(uA, a);
@@ -1021,9 +1051,14 @@ int main() {
 
     glUniform1f(uDiskInnerR, rin);
     glUniform1f(uDiskOuterR, rout);
-    glUniform1f(uDiskHalfThick, 0.025f * M);
-    glUniform1f(uDiskBoost, 2.0f);
+    glUniform1f(uDiskHalfThick, 0.006f * M);
+    glUniform1f(uDiskBoost, 0.95f);
     glUniform1i(uSkyMode, skyMode);
+
+    float lightYaw = (float)(simTime * 0.65);
+    float lx = std::cos(lightYaw);
+    float lz = std::sin(lightYaw);
+    glUniform3f(uLightDir, lx, 0.25f, lz);
 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, prevAccum);
