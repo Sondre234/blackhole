@@ -508,11 +508,11 @@ float diskFlux(float r, float rin) {
 
 vec3 bbApprox(float t) {
   t = clamp01(t);
-  vec3 cool = vec3(0.8, 0.25, 0.08);
-  vec3 mid  = vec3(1.6, 0.9,  0.35);
-  vec3 hot  = vec3(2.2, 2.2,  2.6);
-  vec3 a = mix(cool, mid, smoothstep(0.0, 0.6, t));
-  return mix(a, hot, smoothstep(0.55, 1.0, t));
+  vec3 cool = vec3(0.28, 0.06, 0.02);
+  vec3 mid  = vec3(1.00, 0.36, 0.08);
+  vec3 hot  = vec3(2.30, 1.05, 0.32);
+  vec3 a = mix(cool, mid, smoothstep(0.0, 0.62, t));
+  return mix(a, hot, smoothstep(0.58, 1.0, t));
 }
 
 float gravFactorKerr(float r, float M, float a) {
@@ -527,9 +527,14 @@ vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
   float rin = uDiskInnerR;
   float F = diskFlux(r, rin);
   float T = pow(F, 0.25);
-  T = clamp(T * 2.2, 0.0, 1.0);
+  T = clamp(T * 1.55, 0.0, 1.0);
 
   vec3 col = bbApprox(T);
+
+  float rinN = r / max(rin, 1e-4);
+  float innerRim = 1.0 + 1.4 * exp(-pow((rinN - 1.25) / 0.33, 2.0));
+  float outerFalloff = exp(-0.06 * max(r - rin, 0.0));
+  col *= innerRim * outerFalloff;
 
   // Spin-influenced Keplerian proxy: Omega ~ 1 / (r^(3/2) + a)
   float Omega = 1.0 / (pow(max(r, 1e-3), 1.5) + a);
@@ -631,7 +636,13 @@ vec3 traceKerr(vec3 camPos, vec3 rayDir) {
       float rph_m = photonRadiusEq(M, a, -1.0);
       float d = min(abs(rMin - rph_p), abs(rMin - rph_m));
       float glow = exp(-d / (0.18 * M));
-      base += glow * vec3(0.50, 0.70, 1.10) * 0.35;
+      base += glow * vec3(0.30, 0.48, 0.95) * 0.24;
+
+      // sharpen shadow boundary so the black-hole silhouette reads clearly
+      float shadowEdge = smoothstep(2.2*M, 3.9*M, rMin);
+      base *= mix(0.12, 1.0, shadowEdge);
+      float rim = exp(-pow((rMin - 2.95*M) / (0.33*M), 2.0));
+      base += rim * vec3(0.95, 0.55, 0.20) * 0.22;
 
       float pole = pow(abs(dirOut.y), 10.0);
       base += pole * (0.06 + 0.05*sin(uTime*3.0)) * vec3(0.5, 0.7, 1.2);
@@ -907,9 +918,9 @@ int main() {
   float a = 0.75f * M;
 
   // Bloom knobs
-  float bloomThreshold = 1.25f;
-  float bloomStrength  = 0.85f;
-  float exposure       = 1.05f;
+  float bloomThreshold = 1.55f;
+  float bloomStrength  = 0.48f;
+  float exposure       = 0.95f;
 
   // Sky mode toggle
   int skyMode = 1; // grid by default
@@ -1033,8 +1044,8 @@ int main() {
 
     glUniform1f(uDiskInnerR, rin);
     glUniform1f(uDiskOuterR, rout);
-    glUniform1f(uDiskHalfThick, 0.025f * M);
-    glUniform1f(uDiskBoost, 2.0f);
+    glUniform1f(uDiskHalfThick, 0.012f * M);
+    glUniform1f(uDiskBoost, 1.15f);
     glUniform1i(uSkyMode, skyMode);
 
     float lightYaw = (float)(simTime * 0.65);
