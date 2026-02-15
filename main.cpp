@@ -533,7 +533,7 @@ vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
 
   float rinN = r / max(rin, 1e-4);
   float innerRim = 1.0 + 1.4 * exp(-pow((rinN - 1.25) / 0.33, 2.0));
-  float outerFalloff = exp(-0.06 * max(r - rin, 0.0));
+  float outerFalloff = exp(-0.03 * max(r - rin, 0.0));
   col *= innerRim * outerFalloff;
 
   // Spin-influenced Keplerian proxy: Omega ~ 1 / (r^(3/2) + a)
@@ -562,7 +562,7 @@ vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
   // moving key-light sweep across the disk so accretion structure is easier to read
   vec2 pDir = normalize(p.xz + vec2(1e-6));
   vec2 lDir = normalize(uLightDir.xz + vec2(1e-6));
-  float lightSweep = 0.35 + 0.65*pow(clamp(0.5 + 0.5*dot(pDir, lDir), 0.0, 1.0), 1.3);
+  float lightSweep = 0.55 + 0.45*pow(clamp(0.5 + 0.5*dot(pDir, lDir), 0.0, 1.0), 1.2);
 
   col *= beam * limb * lightSweep;
 
@@ -639,10 +639,15 @@ vec3 traceKerr(vec3 camPos, vec3 rayDir) {
       base += glow * vec3(0.30, 0.48, 0.95) * 0.24;
 
       // sharpen shadow boundary so the black-hole silhouette reads clearly
-      float shadowEdge = smoothstep(2.2*M, 3.9*M, rMin);
-      base *= mix(0.12, 1.0, shadowEdge);
-      float rim = exp(-pow((rMin - 2.95*M) / (0.33*M), 2.0));
-      base += rim * vec3(0.95, 0.55, 0.20) * 0.22;
+      float shadowEdge = smoothstep(2.0*M, 3.3*M, rMin);
+      base *= mix(0.35, 1.0, shadowEdge);
+      float rim = exp(-pow((rMin - 2.95*M) / (0.36*M), 2.0));
+      base += rim * vec3(0.95, 0.55, 0.20) * 0.18;
+
+      // Boost the upper lensed arc so the "disk above the hole" reads clearly.
+      float dArc = min(abs(rMin - rph_p), abs(rMin - rph_m));
+      float upperArc = smoothstep(0.0, 0.35, dirOut.y) * exp(-pow(dArc / (0.42*M), 2.0));
+      base += upperArc * vec3(1.15, 0.72, 0.30) * 0.42;
 
       float pole = pow(abs(dirOut.y), 10.0);
       base += pole * (0.06 + 0.05*sin(uTime*3.0)) * vec3(0.5, 0.7, 1.2);
@@ -1045,7 +1050,7 @@ int main() {
     glUniform1f(uDiskInnerR, rin);
     glUniform1f(uDiskOuterR, rout);
     glUniform1f(uDiskHalfThick, 0.012f * M);
-    glUniform1f(uDiskBoost, 1.15f);
+    glUniform1f(uDiskBoost, 1.35f);
     glUniform1i(uSkyMode, skyMode);
 
     float lightYaw = (float)(simTime * 0.65);
