@@ -54,7 +54,7 @@ static GLuint linkProgram(const std::vector<GLuint>& shaders) {
 }
 
 // ------------------------- Free-fly camera -------------------------
-static float gCamX = 0.0f, gCamY = 0.35f, gCamZ = 12.0f;
+static float gCamX = 0.0f, gCamY = 0.35f, gCamZ = 20.0f;
 static float gYaw = -90.0f, gPitch = 0.0f;
 static float gLastX = 0.0f, gLastY = 0.0f;
 static bool  gFirstMouse = true;
@@ -142,6 +142,11 @@ uniform float uDiskOuterR;     // e.g. 22*M
 uniform float uDiskHalfThick;  // e.g. 0.03*M
 uniform float uDiskBoost;      // e.g. 2.5
 uniform int   uSkyMode;        // 0=stars, 1=grid
+uniform float uTime;
+uniform float uPlanetOrbitR;
+uniform float uPlanetRadius;
+uniform float uPlanetOmega;
+uniform float uPlanetY;
 
 const float PI = 3.141592653589793;
 
@@ -170,7 +175,7 @@ vec3 skyColor(vec3 dir) {
   return col;
 }
 
-bool segmentHitsDisk(vec3 p0, vec3 p1, out vec3 hitPos) {
+bool segmentHitsDisk(vec3 p0, vec3 p1, out vec3 hitPos, out float hitT) {
   // Intersect segment with plane y=0
   float y0 = p0.y, y1 = p1.y;
   if ((y0 > 0.0 && y1 > 0.0) || (y0 < 0.0 && y1 < 0.0)) return false;
@@ -189,11 +194,47 @@ bool segmentHitsDisk(vec3 p0, vec3 p1, out vec3 hitPos) {
   if (r < uDiskInnerR || r > uDiskOuterR) return false;
 
   hitPos = p;
+  hitT = t;
   return true;
+}
+
+bool segmentHitsSphere(vec3 p0, vec3 p1, vec3 center, float radius, out vec3 hitPos, out float hitT) {
+  vec3 d = p1 - p0;
+  vec3 oc = p0 - center;
+  float a = dot(d, d);
+  float b = 2.0 * dot(oc, d);
+  float c = dot(oc, oc) - radius * radius;
+  float disc = b*b - 4.0*a*c;
+  if (disc < 0.0 || a < 1e-8) return false;
+
+  float root = sqrt(disc);
+  float t0 = (-b - root) / (2.0 * a);
+  float t1 = (-b + root) / (2.0 * a);
+  float t = 1e9;
+  if (t0 >= 0.0 && t0 <= 1.0) t = t0;
+  if (t1 >= 0.0 && t1 <= 1.0) t = min(t, t1);
+  if (t > 1.0) return false;
+
+  hitT = t;
+  hitPos = p0 + d * t;
+  return true;
+}
+
+vec3 shadePlanet(vec3 p, vec3 center) {
+  vec3 n = normalize(p - center);
+  vec3 sunDir = normalize(vec3(0.8, 0.35, -0.45));
+  float lit = max(dot(n, sunDir), 0.0);
+
+  float bands = 0.85 + 0.15 * sin((p.y - center.y) * 15.0 + uTime * 0.6);
+  vec3 deep = vec3(0.02, 0.10, 0.35);
+  vec3 bright = vec3(0.30, 0.65, 1.00);
+  vec3 base = mix(deep, bright, lit * 0.85 + 0.15);
+  return base * bands + vec3(0.02, 0.05, 0.10) * pow(lit, 8.0);
 }
 
 vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
   float r = length(p.xz);
+  float azimuth = atan(p.z, p.x);
 
   float t = (r - uDiskInnerR) / max(uDiskOuterR - uDiskInnerR, 1e-6);
   float x = clamp01(t);
@@ -203,6 +244,13 @@ vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
   vec3 cool = vec3(0.15, 0.03, 0.01);
   vec3 warm = vec3(6.0,  2.2,  0.35);
   vec3 col  = mix(cool, warm, hot);
+
+  // Advected turbulence to keep the disk visually alive even when the camera is still.
+  float spinRate = 0.7 / max(sqrt(r), 0.25);
+  float swirl = sin(azimuth * 20.0 - uTime * 7.0 * spinRate + r * 2.3);
+  float bands = sin(azimuth * 57.0 - uTime * 16.0 * spinRate - r * 7.0);
+  float turbulence = 0.75 + 0.25 * swirl + 0.12 * bands;
+  col *= max(turbulence, 0.4);
 
   // Disk rotates around Y: tangent direction
   vec3 tangent = normalize(vec3(-p.z, 0.0, p.x));
@@ -293,10 +341,25 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     float rNow = 1.0 / u;
     vec3 posNow = (a*cos(phi) + b*sin(phi)) * rNow;
 
-    vec3 hitPos;
-    if (segmentHitsDisk(posPrev, posNow, hitPos)) {
+    vec3 planetCenter = vec3(
+      cos(uTime * uPlanetOmega) * uPlanetOrbitR,
+      uPlanetY,
+      sin(uTime * uPlanetOmega) * uPlanetOrbitR
+    );
+
+    vec3 hitDiskPos, hitPlanetPos;
+    float tDisk = 2.0;
+    float tPlanet = 2.0;
+    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk);
+    bool hasPlanet = segmentHitsSphere(posPrev, posNow, planetCenter, uPlanetRadius, hitPlanetPos, tPlanet);
+
+    if (hasPlanet && (!hasDisk || tPlanet < tDisk)) {
+      return vec4(shadePlanet(hitPlanetPos, planetCenter), 1.0);
+    }
+
+    if (hasDisk) {
       vec3 segDir = normalize(posNow - posPrev);
-      vec3 c = shadeDisk(hitPos, segDir, M);
+      vec3 c = shadeDisk(hitDiskPos, segDir, M);
       return vec4(c, 1.0);
     }
     posPrev = posNow;
@@ -417,6 +480,11 @@ int main() {
   GLint uDiskHalfThick= ul(compProg, "uDiskHalfThick");
   GLint uDiskBoost    = ul(compProg, "uDiskBoost");
   GLint uSkyMode      = ul(compProg, "uSkyMode");
+  GLint uTime         = ul(compProg, "uTime");
+  GLint uPlanetOrbitR = ul(compProg, "uPlanetOrbitR");
+  GLint uPlanetRadius = ul(compProg, "uPlanetRadius");
+  GLint uPlanetOmega  = ul(compProg, "uPlanetOmega");
+  GLint uPlanetY      = ul(compProg, "uPlanetY");
 
   // Uniform location (blit)
   GLint uTex = ul(blitProg, "uTex");
@@ -492,6 +560,11 @@ int main() {
     glUniform1f(uDiskHalfThick, 0.025f * M);
     glUniform1f(uDiskBoost, 2.5f);
     glUniform1i(uSkyMode, 1);          // 1=grid, 0=stars
+    glUniform1f(uTime, (float)now);
+    glUniform1f(uPlanetOrbitR, 30.0f * M);
+    glUniform1f(uPlanetRadius, 1.35f * M);
+    glUniform1f(uPlanetOmega, 0.20f);
+    glUniform1f(uPlanetY, 0.8f * M);
 
     glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
 
