@@ -404,7 +404,9 @@ InitConsts kerr_init_from_ray_ZAMO(vec3 camPos, vec3 rayDir)
   float st = max(sin(th), 1e-6);
   float ct = cos(th);
 
-  float Q = p_th*p_th + (ct*ct) * (a*a*E*E - (Lz*Lz)/(st*st));
+  // Null-geodesic Carter constant:
+  // Q = p_theta^2 + cos^2(theta) * (Lz^2/sin^2(theta) - a^2 E^2)
+  float Q = p_th*p_th + (ct*ct) * ((Lz*Lz)/(st*st) - a*a*E*E);
 
   float sr  = (pr  >= 0.0) ? 1.0 : -1.0;
   float sth = (pth >= 0.0) ? 1.0 : -1.0;
@@ -448,7 +450,9 @@ void kerr_deriv(in KerrState s,
   float P = (r*r + a*a) - a*xi;
 
   Rraw  = P*P - Delta*(eta + (xi - a)*(xi - a));
-  Thraw = eta - (xi*xi) * (ct*ct)/(st*st);
+  // Polar potential for null Kerr geodesics:
+  // Theta = eta + a^2 cos^2(theta) - xi^2 cot^2(theta)
+  Thraw = eta + a*a*ct*ct - (xi*xi) * (ct*ct)/(st*st);
 
   float R  = max(Rraw,  0.0);
   float Th = max(Thraw, 0.0);
@@ -580,7 +584,7 @@ vec3 traceKerr(vec3 camPos, vec3 rayDir) {
   s.th = C.th;
   s.ph = C.ph;
   s.xi = C.xi;
-  s.eta = max(C.eta, 0.0);
+  s.eta = C.eta;
   s.sr = C.sr;
   s.sth = C.sth;
 
