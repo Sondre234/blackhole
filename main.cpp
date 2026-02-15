@@ -1,7 +1,12 @@
-// main.cpp — Schwarzschild lensing + animated accretion disk + photon ring glow
+// main.cpp — Kerr lensing (ZAMO tetrad ray->(xi,eta)) + improved disk shading
 // + temporal accumulation (HDR) + BLOOM (threshold + blur + composite)
-// + improved sky grid (NO derivatives in compute; resolution-based AA) + subtle stars
+// + improved sky grid (compute-safe AA) + subtle stars
 // + free-fly camera (WASD + mouse)
+//
+// Fixes included:
+// - Kerr turning-point handling (flip sr/sth when R or Theta reaches ~0)
+// - Proper escape test using dr>0 instead of a position-delta hack
+// - Clamp disk redshift/beaming to avoid “tan slab” blowouts
 //
 // Requires OpenGL 4.3+ (compute shaders), GLFW, GLAD.
 
@@ -123,6 +128,18 @@ static void computeCameraBasis(float basis9[9], float pos3[3]) {
   basis9[6]=fx;  basis9[7]=fy;  basis9[8]=fz;
 }
 
+// ------------------------- Kerr ISCO (C++) -------------------------
+static float kerrISCO(float M, float a) {
+  float am = a / M;
+  float one = 1.0f;
+  float z1 = one + std::cbrt(one - am*am) * (std::cbrt(one + am) + std::cbrt(one - am));
+  float z2 = std::sqrt(3.0f*am*am + z1*z1);
+  float s  = (a >= 0.0f) ? 1.0f : -1.0f;
+  float t  = (3.0f - z1) * (3.0f + z1 + 2.0f*z2);
+  t = std::max(t, 0.0f);
+  return M * (3.0f + z2 - s * std::sqrt(t));
+}
+
 // ------------------------- Shaders -------------------------
 
 static const char* kComputeSrc = R"(#version 430
@@ -140,15 +157,16 @@ uniform int   uFrame;
 uniform int   uResetAccum;
 
 // Camera
-uniform vec3  uCamPos;
-uniform mat3  uCamBasis;
+uniform vec3  uCamPos;      // world/cartesian
+uniform mat3  uCamBasis;    // world
 uniform float uFovY;
 
 // Black hole
 uniform float uM;
+uniform float uA;           // Kerr spin parameter a (|a|<=M)
 
 // Ray integration
-uniform float uPhiStep;
+uniform float uLambdaStep;  // affine step
 uniform int   uMaxSteps;
 uniform float uFarR;
 
@@ -210,22 +228,18 @@ vec3 skyColor(vec3 dir) {
   float lat = asin(clamp(dir.y, -1.0, 1.0));
   vec2 uv = vec2(lon/(2.0*PI)+0.5, lat/PI+0.5);
 
-  // Grid density
   float mer = 16.0;
   float par = 8.0;
 
-  // Convert to cell space
   vec2 g = vec2(uv.x * mer, uv.y * par);
   vec2 f = fract(g);
-  vec2 d = abs(f - 0.5); // distance to line center in cell space (0..0.5)
+  vec2 d = abs(f - 0.5);
 
-  // Approx AA width in cell-space: ~1 pixel in uv => (grid cells per screen pixel)
-  // uv-per-pixel ~ 1/min(res); multiply by grid density to get cell-space per pixel.
   float invMinRes = 1.0 / float(min(uResolution.x, uResolution.y));
   vec2 cellPerPix = vec2(mer, par) * invMinRes;
 
-  float w = 1.25 * max(cellPerPix.x, cellPerPix.y); // slightly thicker AA band
-  float lineW = 0.035; // base line thickness in cell space
+  float w = 1.25 * max(cellPerPix.x, cellPerPix.y);
+  float lineW = 0.035;
 
   float lx = 1.0 - smoothstep(lineW, lineW + w, d.x);
   float ly = 1.0 - smoothstep(lineW, lineW + w, d.y);
@@ -238,7 +252,6 @@ vec3 skyColor(vec3 dir) {
   vec3 gridCol = vec3(0.75, 0.85, 1.05);
   base += grid * gridCol * 0.11;
 
-  // Major lines (lower frequency)
   vec2 gm = vec2(uv.x * 4.0, uv.y * 2.0);
   vec2 fm = fract(gm);
   vec2 dm = abs(fm - 0.5);
@@ -274,138 +287,337 @@ bool segmentHitsDisk(vec3 p0, vec3 p1, out vec3 hitPos) {
   return true;
 }
 
-vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
+// --- Kerr metric helpers (Boyer–Lindquist) ---
+void kerr_metric(float r, float th, float M, float a,
+                 out float Sigma, out float Delta, out float A,
+                 out float g_tt, out float g_tphi, out float g_rr, out float g_thth, out float g_phiphi)
+{
+  float ct = cos(th);
+  float st = max(sin(th), 1e-6);
+
+  Sigma = r*r + a*a*ct*ct;
+  Delta = r*r - 2.0*M*r + a*a;
+
+  float rp2 = r*r + a*a;
+  A = rp2*rp2 - a*a*Delta*st*st;
+
+  g_tt     = -(1.0 - (2.0*M*r)/Sigma);
+  g_tphi   = -(2.0*M*a*r*st*st)/Sigma;
+  g_rr     = Sigma / max(Delta, 1e-8);
+  g_thth   = Sigma;
+  g_phiphi = (A*st*st)/Sigma;
+}
+
+void cart_to_bl(vec3 x, out float r, out float th, out float ph)
+{
+  float a = uA;
+
+  float xx = x.x, yy = x.y, zz = x.z;
+  float rho2 = xx*xx + yy*yy + zz*zz;
+
+  float k = rho2 - a*a;
+  float disc = k*k + 4.0*a*a*yy*yy;
+
+  float r2 = 0.5 * (k + sqrt(max(disc, 0.0)));
+  r = sqrt(max(r2, 1e-12));
+
+  ph = atan(zz, xx);
+
+  float ct = clamp(yy / max(r, 1e-8), -1.0, 1.0);
+  th = acos(ct);
+}
+
+
+void local_spherical_basis(float th, float ph, out vec3 e_r, out vec3 e_th, out vec3 e_ph)
+{
+  float st = sin(th), ct = cos(th);
+  float sp = sin(ph), cp = cos(ph);
+
+  e_r  = vec3(st*cp,  ct, st*sp);
+  e_th = vec3(ct*cp, -st, ct*sp);
+  e_ph = vec3(-sp,   0.0,  cp);
+}
+
+vec3 bl_to_xyz(float r, float th, float ph) {
+  float a = uA;
+  float st = sin(th), ct = cos(th);
+
+  float R = sqrt(max(r*r + a*a, 0.0)); // sqrt(r^2 + a^2)
+
+  float x = R * st * cos(ph);
+  float y = r * ct;
+  float z = R * st * sin(ph);
+  return vec3(x, y, z);
+}
+
+struct InitConsts {
+  float r, th, ph;
+  float xi;
+  float eta;
+  float sr;
+  float sth;
+};
+
+// ZAMO tetrad mapping: world ray -> Kerr constants (xi=Lz/E, eta=Q/E^2)
+InitConsts kerr_init_from_ray_ZAMO(vec3 camPos, vec3 rayDir)
+{
+  InitConsts C;
+  float r, th, ph;
+  cart_to_bl(camPos, r, th, ph);
+
+  float M = uM, a = uA;
+
+  float Sigma, Delta, A, g_tt, g_tphi, g_rr, g_thth, g_phiphi;
+  kerr_metric(r, th, M, a, Sigma, Delta, A, g_tt, g_tphi, g_rr, g_thth, g_phiphi);
+
+  vec3 e_r, e_th, e_ph;
+  local_spherical_basis(th, ph, e_r, e_th, e_ph);
+
+  float nr  = dot(rayDir, e_r);
+  float nth = dot(rayDir, e_th);
+  float nph = dot(rayDir, e_ph);
+
+  float omega = -g_tphi / max(g_phiphi, 1e-8);
+  float alpha = sqrt(max(Sigma * Delta / max(A, 1e-8), 1e-8));
+
+  float nt = 1.0 / alpha;          // n^t
+  float nphi_t = omega / alpha;    // n^phi
+
+  float er_r   = sqrt(max(Delta / Sigma, 0.0));
+  float eth_th = 1.0 / sqrt(max(Sigma, 1e-8));
+  float eph_ph = 1.0 / sqrt(max(g_phiphi, 1e-8));
+
+  // contravariant p^mu
+  float pt   = nt;
+  float pr   = nr * er_r;
+  float pth  = nth * eth_th;
+  float pphi = nphi_t + nph * eph_ph;
+
+  // covariant p_mu
+  float p_t   = g_tt*pt + g_tphi*pphi;
+  float p_phi = g_tphi*pt + g_phiphi*pphi;
+  float p_th  = g_thth*pth;
+
+  float E  = -p_t;
+  float Lz =  p_phi;
+
+  float st = max(sin(th), 1e-6);
+  float ct = cos(th);
+
+  float Q = p_th*p_th + (ct*ct) * (a*a*E*E - (Lz*Lz)/(st*st));
+
+  float sr  = (pr  >= 0.0) ? 1.0 : -1.0;
+  float sth = (pth >= 0.0) ? 1.0 : -1.0;
+
+  C.r = r; C.th = th; C.ph = ph;
+  C.xi = Lz / max(E, 1e-8);
+  C.eta = Q  / max(E*E, 1e-8);
+  C.sr = sr;
+  C.sth = sth;
+  return C;
+}
+
+struct KerrState {
+  float r, th, ph;
+  float xi;
+  float eta;
+  float sr;
+  float sth;
+};
+
+// derivative + raw potentials (for turning-point detection)
+void kerr_deriv(in KerrState s,
+                out float dr, out float dth, out float dph,
+                out float Rraw, out float Thraw)
+{
+  float M = uM;
+  float a = uA;
+
+  float r = s.r;
+  float th = s.th;
+
+  float ct = cos(th);
+  float st = max(sin(th), 1e-6);
+
+  float Sigma = r*r + a*a*ct*ct;
+  float Delta = r*r - 2.0*M*r + a*a;
+
+  float xi  = s.xi;
+  float eta = s.eta;
+
+  float P = (r*r + a*a) - a*xi;
+
+  Rraw  = P*P - Delta*(eta + (xi - a)*(xi - a));
+  Thraw = eta - (xi*xi) * (ct*ct)/(st*st);
+
+  float R  = max(Rraw,  0.0);
+  float Th = max(Thraw, 0.0);
+
+  dr  = s.sr  * sqrt(R)  / max(Sigma, 1e-8);
+  dth = s.sth * sqrt(Th) / max(Sigma, 1e-8);
+
+  float term1 = a * P / (max(Delta, 1e-8) * max(Sigma, 1e-8));
+  float term2 = (xi/(st*st) - a) / max(Sigma, 1e-8);
+  dph = term1 + term2;
+}
+
+void kerr_step(inout KerrState s, float h) {
+  float dr1, dt1, dp1, R1, T1; kerr_deriv(s, dr1, dt1, dp1, R1, T1);
+
+  KerrState s2 = s; s2.r += 0.5*h*dr1; s2.th += 0.5*h*dt1; s2.ph += 0.5*h*dp1;
+  float dr2, dt2, dp2, R2, T2; kerr_deriv(s2, dr2, dt2, dp2, R2, T2);
+
+  KerrState s3 = s; s3.r += 0.5*h*dr2; s3.th += 0.5*h*dt2; s3.ph += 0.5*h*dp2;
+  float dr3, dt3, dp3, R3, T3; kerr_deriv(s3, dr3, dt3, dp3, R3, T3);
+
+  KerrState s4 = s; s4.r += h*dr3; s4.th += h*dt3; s4.ph += h*dp3;
+  float dr4, dt4, dp4, R4, T4; kerr_deriv(s4, dr4, dt4, dp4, R4, T4);
+
+  s.r  += (h/6.0)*(dr1 + 2.0*dr2 + 2.0*dr3 + dr4);
+  s.th += (h/6.0)*(dt1 + 2.0*dt2 + 2.0*dt3 + dt4);
+  s.ph += (h/6.0)*(dp1 + 2.0*dp2 + 2.0*dp3 + dp4);
+
+  s.th = clamp(s.th, 1e-4, PI-1e-4);
+
+  // --- TURNING POINT FIX ---
+  // flip sr/sth near turning points so rays bounce correctly
+  float epsR  = 1e-7 * (1.0 + 10.0*h);
+  float epsTh = 1e-7 * (1.0 + 10.0*h);
+
+  float dr, dth, dph, Rraw, Thraw;
+  kerr_deriv(s, dr, dth, dph, Rraw, Thraw);
+
+  if (Rraw  <= epsR)  s.sr  *= -1.0;
+  if (Thraw <= epsTh) s.sth *= -1.0;
+}
+
+// --- Improved disk shading ---
+float diskFlux(float r, float rin) {
+  float x = max(r, rin*1.0005);
+  float f = pow(x, -3.0) * (1.0 - sqrt(rin / x));
+  return max(f, 0.0);
+}
+
+vec3 bbApprox(float t) {
+  t = clamp01(t);
+  vec3 cool = vec3(0.8, 0.25, 0.08);
+  vec3 mid  = vec3(1.6, 0.9,  0.35);
+  vec3 hot  = vec3(2.2, 2.2,  2.6);
+  vec3 a = mix(cool, mid, smoothstep(0.0, 0.6, t));
+  return mix(a, hot, smoothstep(0.55, 1.0, t));
+}
+
+float gravFactorKerr(float r, float M, float a) {
+  float Delta = r*r - 2.0*M*r + a*a;
+  return sqrt(max(Delta / max(r*r + a*a, 1e-6), 0.0));
+}
+
+vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
+  float M = uM, a = uA;
   float r = length(p.xz);
 
-  float t = (r - uDiskInnerR) / max(uDiskOuterR - uDiskInnerR, 1e-6);
-  float x = clamp01(t);
-  float hot = pow(1.0 - x, 1.8);
+  float rin = uDiskInnerR;
+  float F = diskFlux(r, rin);
+  float T = pow(F, 0.25);
+  T = clamp(T * 2.2, 0.0, 1.0);
 
-  vec3 cool = vec3(0.12, 0.02, 0.01);
-  vec3 warm = vec3(7.5,  2.6,  0.40);
-  vec3 col  = mix(cool, warm, hot);
+  vec3 col = bbApprox(T);
 
-  vec3 tangent = normalize(vec3(-p.z, 0.0, p.x));
+  // Spin-influenced Keplerian proxy: Omega ~ 1 / (r^(3/2) + a)
+  float Omega = 1.0 / (pow(max(r, 1e-3), 1.5) + a);
+  float v = clamp(Omega * r, 0.0, 0.75);
 
-  float beta  = clamp01(sqrt(M / max(r, 1e-4)) * 0.55) * 0.7;
+  float beta  = v;
   float gamma = inversesqrt(1.0 - beta*beta);
 
-  float mu  = dot(tangent, normalize(-segDir));
-  float dop = 1.0 / (gamma * (1.0 - beta * mu));
-  float beam = pow(dop, 3.0);
+  vec3 tangent = normalize(vec3(-p.z, 0.0, p.x));
+  float mu = dot(tangent, normalize(-segDir));
 
-  float blu = clamp01((dop - 1.0) * 0.9);
-  float red = clamp01((1.0 - dop) * 0.9);
-  vec3 blueTint = vec3(0.65, 0.85, 1.35);
-  vec3 redTint  = vec3(1.35, 0.80, 0.62);
-  col *= mix(vec3(1.0), blueTint, blu);
-  col *= mix(vec3(1.0), redTint,  red);
+  float D = 1.0 / (gamma * (1.0 - beta * mu));
+  float ggrav = gravFactorKerr(r, M, a);
+  float g = D * ggrav;
 
-  float rs = 2.0 * M;
-  float g  = sqrt(max(1.0 - rs / max(r, rs*1.001), 0.0));
-  col *= (0.22 + 0.78 * g);
+  // Clamp beaming so it doesn't explode into "tan slab"
+  g = clamp(g, 0.0, 3.0);
+  float beam = min(g*g*g, 30.0);
 
+  // limb darkening (mild)
+  vec3 n = vec3(0.0, 1.0, 0.0);
+  float cosi = clamp(dot(n, normalize(-segDir)), 0.0, 1.0);
+  float limb = 0.55 + 0.45*cosi;
+
+  col *= beam * limb;
+
+  // subtle texture structure
   float ang = atan(p.z, p.x);
-  float spiral = sin(ang * 10.0 - r * 0.90 + uTime * 2.1);
-  spiral = 0.5 + 0.5 * spiral;
+  float spiral = 0.5 + 0.5*sin(ang*8.0 - r*0.85 + uTime*1.8);
+  float nse = noise(vec2(ang*2.0, r*0.25) + vec2(uTime*0.4, -uTime*0.2));
+  float textureMod = mix(0.85, 1.25, spiral) * mix(0.90, 1.15, nse);
+  col *= textureMod;
 
-  float n = noise(vec2(ang * 2.2, r * 0.28) + vec2(uTime * 0.55, -uTime * 0.25));
-  float grain = mix(0.82, 1.30, n);
-
-  float band = mix(0.70, 1.45, spiral);
-  col *= band * grain;
-
-  col *= uDiskBoost * beam;
+  col *= uDiskBoost;
   return col;
 }
 
-vec3 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
-  float M  = uM;
-  float rs = 2.0 * M;
+// Kerr photon ring (equatorial) radii for glow weighting (cheap, pretty)
+float photonRadiusEq(float M, float a, float sgn) {
+  float x = clamp(-sgn * a / max(M, 1e-8), -1.0, 1.0);
+  float ang = acos(x);
+  return 2.0*M*(1.0 + cos((2.0/3.0)*ang));
+}
 
-  vec3 r0 = camPos;
-  float rObs = length(r0);
-  if (rObs <= rs * 1.001) return vec3(0.0);
+// Trace Kerr: returns HDR color
+vec3 traceKerr(vec3 camPos, vec3 rayDir) {
+  float M = uM;
+  float a = uA;
 
-  vec3 a = normalize(r0);
-  vec3 v = normalize(rayDir);
+  float rplus = M + sqrt(max(M*M - a*a, 0.0));
 
-  vec3 n = cross(r0, v);
-  float nlen = length(n);
-  if (nlen < 1e-6) return skyColor(v);
-  n /= nlen;
+  InitConsts C = kerr_init_from_ray_ZAMO(camPos, rayDir);
 
-  vec3 b = normalize(cross(n, a));
+  KerrState s;
+  s.r = C.r;
+  s.th = C.th;
+  s.ph = C.ph;
+  s.xi = C.xi;
+  s.eta = max(C.eta, 0.0);
+  s.sr = C.sr;
+  s.sth = C.sth;
 
-  float v_r = dot(v, a);
-  float v_t = dot(v, b);
-  if (v_t < 0.0) { b = -b; v_t = -v_t; }
+  if (s.r <= rplus*1.001) return vec3(0.0);
 
-  float L = max(rObs * v_t, 1e-6);
-
-  float u = 1.0 / rObs;
-  float p = -(v_r) / L;
-  float phi = 0.0;
-
-  vec3 posPrev = (a*cos(phi) + b*sin(phi)) * rObs;
+  vec3 posPrev = bl_to_xyz(s.r, s.th, s.ph);
 
   float rMin = 1e30;
 
   for (int i = 0; i < uMaxSteps; i++) {
-    float r = 1.0 / u;
-    if (r <= rs * 1.001) return vec3(0.0);
+    if (s.r <= rplus*1.001) return vec3(0.0);
 
-    float h = uPhiStep;
+    kerr_step(s, uLambdaStep);
 
-    float k1_u = p;
-    float k1_p = 3.0*M*u*u - u;
-
-    float u2 = u + 0.5*h*k1_u;
-    float p2 = p + 0.5*h*k1_p;
-    float k2_u = p2;
-    float k2_p = 3.0*M*u2*u2 - u2;
-
-    float u3 = u + 0.5*h*k2_u;
-    float p3 = p + 0.5*h*k2_p;
-    float k3_u = p3;
-    float k3_p = 3.0*M*u3*u3 - u3;
-
-    float u4 = u + h*k3_u;
-    float p4 = p + h*k3_p;
-    float k4_u = p4;
-    float k4_p = 3.0*M*u4*u4 - u4;
-
-    u   += (h/6.0) * (k1_u + 2.0*k2_u + 2.0*k3_u + k4_u);
-    p   += (h/6.0) * (k1_p + 2.0*k2_p + 2.0*k3_p + k4_p);
-    phi += h;
-
-    if (u <= 0.0) return skyColor(v);
-
-    float rNow = 1.0 / u;
+    float rNow = s.r;
     rMin = min(rMin, rNow);
 
-    vec3 posNow = (a*cos(phi) + b*sin(phi)) * rNow;
+    vec3 posNow = bl_to_xyz(s.r, s.th, s.ph);
 
     vec3 hitPos;
     if (segmentHitsDisk(posPrev, posNow, hitPos)) {
       vec3 segDir = normalize(posNow - posPrev);
-      return shadeDisk(hitPos, segDir, M);
+      return shadeDiskBetter(hitPos, segDir);
     }
-    posPrev = posNow;
 
-    float dr_dlambda = -L * p;
-    if (rNow >= uFarR && dr_dlambda > 0.0) {
-      float dr_dphi = -p / (u*u);
-      float c = cos(phi);
-      float s = sin(phi);
-      float dx = dr_dphi * c + rNow * (-s);
-      float dy = dr_dphi * s + rNow * ( c);
-      vec3 dirOut = normalize(a * dx + b * dy);
+    // Proper escape test: use dr>0 at large r
+    float dr, dth, dph, Rraw, Thraw;
+    kerr_deriv(s, dr, dth, dph, Rraw, Thraw);
 
+    if (rNow >= uFarR && dr > 0.0) {
+      vec3 dirOut = normalize(posNow - posPrev);
       vec3 base = skyColor(dirOut);
 
-      float photon = 3.0 * M;
-      float glow = exp(-abs(rMin - photon) / (0.15 * M));
+      float rph_p = photonRadiusEq(M, a, +1.0);
+      float rph_m = photonRadiusEq(M, a, -1.0);
+      float d = min(abs(rMin - rph_p), abs(rMin - rph_m));
+      float glow = exp(-d / (0.18 * M));
       base += glow * vec3(0.50, 0.70, 1.10) * 0.35;
 
       float pole = pow(abs(dirOut.y), 10.0);
@@ -413,6 +625,8 @@ vec3 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
 
       return base;
     }
+
+    posPrev = posNow;
   }
 
   return vec3(0.0);
@@ -434,7 +648,7 @@ void main() {
 
   vec3 rayDir = normalize(forward * f + right * ndc.x + up * ndc.y);
 
-  vec3 hdr = traceSchwarzschild(uCamPos, rayDir);
+  vec3 hdr = traceKerr(uCamPos, rayDir);
 
   vec3 prev = texture(uPrevAccum, uv).rgb;
   bool reset = (uResetAccum == 1) || (uFrame == 0);
@@ -582,7 +796,7 @@ int main() {
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
   int W = 1280, H = 720;
-  GLFWwindow* win = glfwCreateWindow(W, H, "Black Hole (HDR Accum + Bloom)", nullptr, nullptr);
+  GLFWwindow* win = glfwCreateWindow(W, H, "Kerr Black Hole (HDR Accum + Bloom)", nullptr, nullptr);
   if (!win) die("Failed to create window");
 
   glfwMakeContextCurrent(win);
@@ -631,7 +845,8 @@ int main() {
   GLint uCamBasis     = ul(compProg, "uCamBasis");
   GLint uFovY         = ul(compProg, "uFovY");
   GLint uM            = ul(compProg, "uM");
-  GLint uPhiStep      = ul(compProg, "uPhiStep");
+  GLint uA            = ul(compProg, "uA");
+  GLint uLambdaStep   = ul(compProg, "uLambdaStep");
   GLint uMaxSteps     = ul(compProg, "uMaxSteps");
   GLint uFarR         = ul(compProg, "uFarR");
   GLint uDiskInnerR   = ul(compProg, "uDiskInnerR");
@@ -674,6 +889,9 @@ int main() {
 
   const float M = 1.0f;
 
+  // Spin knobs (keyboard tweakable)
+  float a = 0.75f * M;
+
   // Bloom knobs
   float bloomThreshold = 1.25f;
   float bloomStrength  = 0.85f;
@@ -695,6 +913,15 @@ int main() {
     if (glfwGetKey(win, GLFW_KEY_2) == GLFW_PRESS) { gTimeScale = 1.0f; }
     if (glfwGetKey(win, GLFW_KEY_3) == GLFW_PRESS) { gTimeScale = 3.0f; }
     if (glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS) { gTimeScale = 0.0f; }
+
+    // Spin controls: Z/X decrease/increase
+    static int lastZ = GLFW_RELEASE, lastX = GLFW_RELEASE;
+    int nowZ = glfwGetKey(win, GLFW_KEY_Z);
+    int nowX = glfwGetKey(win, GLFW_KEY_X);
+    if (nowZ == GLFW_PRESS && lastZ == GLFW_RELEASE) { a -= 0.05f * M; gResetAccum = true; gFrame = 0; }
+    if (nowX == GLFW_PRESS && lastX == GLFW_RELEASE) { a += 0.05f * M; gResetAccum = true; gFrame = 0; }
+    lastZ = nowZ; lastX = nowX;
+    a = std::max(-0.999f*M, std::min(0.999f*M, a));
 
     // Sky toggle: G = grid, H = stars
     static int lastG = GLFW_RELEASE, lastH = GLFW_RELEASE;
@@ -766,6 +993,9 @@ int main() {
     GLuint writeAccum = (gFrame % 2 == 0) ? accumA : accumB;
     GLuint prevAccum  = (gFrame % 2 == 0) ? accumB : accumA;
 
+    float rin  = kerrISCO(M, a);
+    float rout = 22.0f * M;
+
     // -------------------- Compute pass --------------------
     glUseProgram(compProg);
 
@@ -779,14 +1009,16 @@ int main() {
     glUniform1f(uFovY, 55.0f);
 
     glUniform1f(uM, M);
-    glUniform1f(uPhiStep, 0.0026f);
-    glUniform1i(uMaxSteps, 12000);
-    glUniform1f(uFarR, 220.0f);
+    glUniform1f(uA, a);
 
-    glUniform1f(uDiskInnerR, 3.2f * M);
-    glUniform1f(uDiskOuterR, 22.0f * M);
+    glUniform1f(uLambdaStep, 0.02f);
+    glUniform1i(uMaxSteps, 9000);
+    glUniform1f(uFarR, 260.0f);
+
+    glUniform1f(uDiskInnerR, rin);
+    glUniform1f(uDiskOuterR, rout);
     glUniform1f(uDiskHalfThick, 0.025f * M);
-    glUniform1f(uDiskBoost, 2.6f);
+    glUniform1f(uDiskBoost, 2.0f);
     glUniform1i(uSkyMode, skyMode);
 
     glActiveTexture(GL_TEXTURE1);
