@@ -64,8 +64,8 @@ static GLuint linkProgram(const std::vector<GLuint>& shaders) {
 }
 
 // ------------------------- Camera -------------------------
-static float gCamX = 0.0f, gCamY = 1.8f, gCamZ = 12.0f;
-static float gYaw = -90.0f, gPitch = -8.0f;
+static float gCamX = 0.0f, gCamY = 4.6f, gCamZ = 22.0f;
+static float gYaw = -90.0f, gPitch = -12.0f;
 static bool  gLockCamera = true;
 static float gLastX = 0.0f, gLastY = 0.0f;
 static bool  gFirstMouse = true;
@@ -508,9 +508,9 @@ float diskFlux(float r, float rin) {
 
 vec3 bbApprox(float t) {
   t = clamp01(t);
-  vec3 cool = vec3(0.28, 0.06, 0.02);
-  vec3 mid  = vec3(1.00, 0.36, 0.08);
-  vec3 hot  = vec3(2.30, 1.05, 0.32);
+  vec3 cool = vec3(0.10, 0.015, 0.005);
+  vec3 mid  = vec3(0.90, 0.18, 0.03);
+  vec3 hot  = vec3(2.00, 0.62, 0.10);
   vec3 a = mix(cool, mid, smoothstep(0.0, 0.62, t));
   return mix(a, hot, smoothstep(0.58, 1.0, t));
 }
@@ -533,7 +533,7 @@ vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
 
   float rinN = r / max(rin, 1e-4);
   float innerRim = 1.0 + 1.4 * exp(-pow((rinN - 1.25) / 0.33, 2.0));
-  float outerFalloff = exp(-0.03 * max(r - rin, 0.0));
+  float outerFalloff = exp(-0.11 * max(r - rin, 0.0));
   col *= innerRim * outerFalloff;
 
   // Spin-influenced Keplerian proxy: Omega ~ 1 / (r^(3/2) + a)
@@ -562,7 +562,7 @@ vec3 shadeDiskBetter(vec3 p, vec3 segDir) {
   // moving key-light sweep across the disk so accretion structure is easier to read
   vec2 pDir = normalize(p.xz + vec2(1e-6));
   vec2 lDir = normalize(uLightDir.xz + vec2(1e-6));
-  float lightSweep = 0.55 + 0.45*pow(clamp(0.5 + 0.5*dot(pDir, lDir), 0.0, 1.0), 1.2);
+  float lightSweep = 0.72 + 0.28*pow(clamp(0.5 + 0.5*dot(pDir, lDir), 0.0, 1.0), 1.0);
 
   col *= beam * limb * lightSweep;
 
@@ -638,16 +638,18 @@ vec3 traceKerr(vec3 camPos, vec3 rayDir) {
       float glow = exp(-d / (0.18 * M));
       base += glow * vec3(0.30, 0.48, 0.95) * 0.24;
 
-      // sharpen shadow boundary so the black-hole silhouette reads clearly
-      float shadowEdge = smoothstep(2.0*M, 3.3*M, rMin);
-      base *= mix(0.35, 1.0, shadowEdge);
-      float rim = exp(-pow((rMin - 2.95*M) / (0.36*M), 2.0));
-      base += rim * vec3(0.95, 0.55, 0.20) * 0.18;
+      // Keep silhouette legible, but avoid flattening everything around it.
+      float shadowEdge = smoothstep(2.1*M, 3.4*M, rMin);
+      base *= mix(0.45, 1.0, shadowEdge);
+      float rim = exp(-pow((rMin - 2.9*M) / (0.34*M), 2.0));
+      base += rim * vec3(1.00, 0.45, 0.12) * 0.20;
 
-      // Boost the upper lensed arc so the "disk above the hole" reads clearly.
       float dArc = min(abs(rMin - rph_p), abs(rMin - rph_m));
-      float upperArc = smoothstep(0.0, 0.35, dirOut.y) * exp(-pow(dArc / (0.42*M), 2.0));
-      base += upperArc * vec3(1.15, 0.72, 0.30) * 0.42;
+      float ringBand = exp(-pow(dArc / (0.38*M), 2.0));
+      float upperArc = smoothstep(0.0, 0.33, dirOut.y) * ringBand;
+      float lowerArc = smoothstep(0.0, 0.42, -dirOut.y) * ringBand;
+      base += upperArc * vec3(1.22, 0.58, 0.16) * 0.46;
+      base += lowerArc * vec3(1.00, 0.42, 0.12) * 0.26;
 
       float pole = pow(abs(dirOut.y), 10.0);
       base += pole * (0.06 + 0.05*sin(uTime*3.0)) * vec3(0.5, 0.7, 1.2);
@@ -923,12 +925,12 @@ int main() {
   float a = 0.75f * M;
 
   // Bloom knobs
-  float bloomThreshold = 1.55f;
-  float bloomStrength  = 0.48f;
-  float exposure       = 0.95f;
+  float bloomThreshold = 1.90f;
+  float bloomStrength  = 0.28f;
+  float exposure       = 0.82f;
 
   // Sky mode toggle
-  int skyMode = 1; // grid by default
+  int skyMode = 0; // stars by default
 
   while (!glfwWindowShouldClose(win)) {
     glfwPollEvents();
@@ -1026,7 +1028,7 @@ int main() {
     GLuint prevAccum  = (gFrame % 2 == 0) ? accumB : accumA;
 
     float rin  = kerrISCO(M, a);
-    float rout = 22.0f * M;
+    float rout = 12.0f * M;
 
     // -------------------- Compute pass --------------------
     glUseProgram(compProg);
@@ -1038,7 +1040,7 @@ int main() {
 
     glUniform3f(uCamPos, pos[0], pos[1], pos[2]);
     glUniformMatrix3fv(uCamBasis, 1, GL_FALSE, basis);
-    glUniform1f(uFovY, 55.0f);
+    glUniform1f(uFovY, 34.0f);
 
     glUniform1f(uM, M);
     glUniform1f(uA, a);
@@ -1049,8 +1051,8 @@ int main() {
 
     glUniform1f(uDiskInnerR, rin);
     glUniform1f(uDiskOuterR, rout);
-    glUniform1f(uDiskHalfThick, 0.012f * M);
-    glUniform1f(uDiskBoost, 1.35f);
+    glUniform1f(uDiskHalfThick, 0.006f * M);
+    glUniform1f(uDiskBoost, 0.95f);
     glUniform1i(uSkyMode, skyMode);
 
     float lightYaw = (float)(simTime * 0.65);
