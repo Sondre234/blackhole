@@ -328,7 +328,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
   vec3 starRayEnd = camPos + rayDir * uFarR;
 
   // Phase 1: red hypergiant (no black hole, no relativistic lensing yet).
-  if (collapse < kHypergiantEnd) {
+  if (collapse < 0.72) {
     vec3 starHitPos;
     float starHitT;
     bool hasStarHit = segmentHitsSphere(camPos, starRayEnd, starCenter, starRadius, starHitPos, starHitT);
@@ -336,25 +336,23 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     return vec4(skyColor(rayDir, 0.0), 1.0);
   }
 
-  // Phase 2: prolonged supernova + ejecta shell (still no black-hole lensing).
-  if (collapse < kSupernovaEnd) {
-    float snPhase = smoothstep(kHypergiantEnd, kSupernovaEnd, collapse);
-    float shellRadius = mix(starRadius, uStarRadiusStart * 1.8, snPhase);
-    float shellThickness = mix(0.90 * uM, 0.30 * uM, snPhase);
+  // Phase 2: supernova flash (still no black-hole lensing).
+  if (collapse < 0.84) {
+    float snPhase = smoothstep(0.72, 0.84, collapse);
+    float shellRadius = mix(starRadius, uStarRadiusStart * 1.35, snPhase);
+    float shellThickness = mix(0.65 * uM, 0.35 * uM, snPhase);
 
     vec3 hitOuterPos, hitInnerPos;
     float tOuter, tInner;
     bool hitOuter = segmentHitsSphere(camPos, starRayEnd, starCenter, shellRadius, hitOuterPos, tOuter);
     bool hitInner = segmentHitsSphere(camPos, starRayEnd, starCenter, max(shellRadius - shellThickness, 0.01), hitInnerPos, tInner);
     if (hitOuter && (!hitInner || tOuter < tInner)) {
-      vec3 sn = shadeSupernova(hitOuterPos, starCenter, snPhase);
-      vec3 hyper = shadeHypergiant(hitOuterPos, starCenter);
-      return vec4(mix(hyper, sn, snPhase), 1.0);
+      return vec4(shadeSupernova(hitOuterPos, starCenter, snPhase), 1.0);
     }
     return vec4(skyColor(rayDir, 0.0), 1.0);
   }
 
-  float bhPhase = smoothstep(kSupernovaEnd, 1.0, collapse);
+  float bhPhase = smoothstep(0.84, 1.0, collapse);
   float M  = mix(0.22 * uM, uM, bhPhase);
   float rs = 2.0 * M;
 
@@ -435,7 +433,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     vec3 hitDiskPos, hitPlanetPos;
     float tDisk = 2.0;
     float tPlanet = 2.0;
-    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk) && bhPhase > 0.08;
+    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk) && bhPhase > 0.15;
     bool hasPlanet = segmentHitsSphere(posPrev, posNow, planetCenter, uPlanetRadius, hitPlanetPos, tPlanet);
 
     if (hasPlanet && (!hasDisk || tPlanet < tDisk)) {
@@ -444,7 +442,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
 
     if (hasDisk) {
       vec3 segDir = normalize(posNow - posPrev);
-      vec3 c = shadeDisk(hitDiskPos, segDir, M) * smoothstep(0.08, 0.95, bhPhase);
+      vec3 c = shadeDisk(hitDiskPos, segDir, M) * smoothstep(0.15, 0.90, bhPhase);
       return vec4(c, 1.0);
     }
     posPrev = posNow;
@@ -502,8 +500,6 @@ in vec2 vUV;
 out vec4 FragColor;
 uniform sampler2D uTex;
 uniform float uHudCollapse;
-const float kHypergiantEnd = 0.50;
-const float kSupernovaEnd = 0.78;
 
 float rectMask(vec2 uv, vec2 mn, vec2 mx) {
   vec2 s = step(mn, uv) * step(uv, mx);
@@ -534,8 +530,8 @@ void main() {
     col = mix(col, vec3(0.12), 0.8 * barBg);
     vec2 pf = vec2(mix(p0.x, p1.x, c), p1.y);
     float barFill = rectMask(vUV, p0, pf);
-    vec3 lifeCol = mix(vec3(0.8, 0.2, 0.06), vec3(0.9, 0.85, 0.65), smoothstep(kHypergiantEnd, kSupernovaEnd, c));
-    lifeCol = mix(lifeCol, vec3(0.65, 0.82, 1.0), smoothstep(kSupernovaEnd, 1.0, c));
+    vec3 lifeCol = mix(vec3(0.8, 0.2, 0.06), vec3(0.9, 0.85, 0.65), smoothstep(0.50, 0.78, c));
+    lifeCol = mix(lifeCol, vec3(0.65, 0.82, 1.0), smoothstep(0.78, 1.0, c));
     col = mix(col, lifeCol, 0.95 * barFill);
 
     // Layer diagram (outer -> inner shells)
@@ -555,7 +551,7 @@ void main() {
     else if (c < 0.36) active = 1.0;
     else if (c < 0.54) active = 2.0;
     else if (c < 0.68) active = 3.0;
-    else if (c < kSupernovaEnd) active = 4.0;
+    else if (c < 0.78) active = 4.0;
     else active = 5.0;
 
     for (int i = 0; i < 6; i++) {
@@ -718,7 +714,7 @@ int main() {
     glUniformMatrix3fv(uCamBasis, 1, GL_FALSE, basis);
     glUniform1f(uFovY, 55.0f);
 
-    float collapse = std::min((float)(now / 42.0), 1.0f);
+    float collapse = std::min((float)(now / 18.0), 1.0f);
 
     glUniform1f(uM, M);
     glUniform1f(uPhiStep, 0.0026f);    // nicer near strong lensing
