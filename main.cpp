@@ -326,7 +326,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
   vec3 starRayEnd = camPos + rayDir * uFarR;
 
   // Phase 1: red hypergiant (no black hole, no relativistic lensing yet).
-  if (collapse < 0.50) {
+  if (collapse < 0.72) {
     vec3 starHitPos;
     float starHitT;
     bool hasStarHit = segmentHitsSphere(camPos, starRayEnd, starCenter, starRadius, starHitPos, starHitT);
@@ -334,25 +334,23 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     return vec4(skyColor(rayDir, 0.0), 1.0);
   }
 
-  // Phase 2: prolonged supernova + ejecta shell (still no black-hole lensing).
-  if (collapse < 0.78) {
-    float snPhase = smoothstep(0.50, 0.78, collapse);
-    float shellRadius = mix(starRadius, uStarRadiusStart * 1.8, snPhase);
-    float shellThickness = mix(0.90 * uM, 0.30 * uM, snPhase);
+  // Phase 2: supernova flash (still no black-hole lensing).
+  if (collapse < 0.84) {
+    float snPhase = smoothstep(0.72, 0.84, collapse);
+    float shellRadius = mix(starRadius, uStarRadiusStart * 1.35, snPhase);
+    float shellThickness = mix(0.65 * uM, 0.35 * uM, snPhase);
 
     vec3 hitOuterPos, hitInnerPos;
     float tOuter, tInner;
     bool hitOuter = segmentHitsSphere(camPos, starRayEnd, starCenter, shellRadius, hitOuterPos, tOuter);
     bool hitInner = segmentHitsSphere(camPos, starRayEnd, starCenter, max(shellRadius - shellThickness, 0.01), hitInnerPos, tInner);
     if (hitOuter && (!hitInner || tOuter < tInner)) {
-            vec3 sn = shadeSupernova(hitOuterPos, starCenter, snPhase);
-      vec3 hyper = shadeHypergiant(hitOuterPos, starCenter);
-      return vec4(mix(hyper, sn, snPhase), 1.0);
+      return vec4(shadeSupernova(hitOuterPos, starCenter, snPhase), 1.0);
     }
     return vec4(skyColor(rayDir, 0.0), 1.0);
   }
 
-  float bhPhase = smoothstep(0.78, 1.0, collapse);
+  float bhPhase = smoothstep(0.84, 1.0, collapse);
   float M  = mix(0.22 * uM, uM, bhPhase);
   float rs = 2.0 * M;
 
@@ -433,7 +431,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     vec3 hitDiskPos, hitPlanetPos;
     float tDisk = 2.0;
     float tPlanet = 2.0;
-    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk) && bhPhase > 0.08;
+    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk) && bhPhase > 0.15;
     bool hasPlanet = segmentHitsSphere(posPrev, posNow, planetCenter, uPlanetRadius, hitPlanetPos, tPlanet);
 
     if (hasPlanet && (!hasDisk || tPlanet < tDisk)) {
@@ -442,7 +440,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
 
     if (hasDisk) {
       vec3 segDir = normalize(posNow - posPrev);
-      vec3 c = shadeDisk(hitDiskPos, segDir, M) * smoothstep(0.08, 0.95, bhPhase);
+      vec3 c = shadeDisk(hitDiskPos, segDir, M) * smoothstep(0.15, 0.90, bhPhase);
       return vec4(c, 1.0);
     }
     posPrev = posNow;
@@ -714,7 +712,7 @@ int main() {
     glUniformMatrix3fv(uCamBasis, 1, GL_FALSE, basis);
     glUniform1f(uFovY, 55.0f);
 
-    float collapse = std::min((float)(now / 42.0), 1.0f);
+    float collapse = std::min((float)(now / 18.0), 1.0f);
 
     glUniform1f(uM, M);
     glUniform1f(uPhiStep, 0.0026f);    // nicer near strong lensing
