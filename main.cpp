@@ -152,6 +152,8 @@ uniform float uStarRadiusStart;
 uniform float uStarRadiusEnd;
 
 const float PI = 3.141592653589793;
+const float kHypergiantEnd = 0.50;
+const float kSupernovaEnd = 0.78;
 
 float clamp01(float x) { return max(0.0, min(1.0, x)); } // avoids clamp() overload ambiguity
 
