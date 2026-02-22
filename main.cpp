@@ -147,8 +147,13 @@ uniform float uPlanetOrbitR;
 uniform float uPlanetRadius;
 uniform float uPlanetOmega;
 uniform float uPlanetY;
+uniform float uCollapse;
+uniform float uStarRadiusStart;
+uniform float uStarRadiusEnd;
 
 const float PI = 3.141592653589793;
+const float kHypergiantEnd = 0.50;
+const float kSupernovaEnd = 0.78;
 
 float clamp01(float x) { return max(0.0, min(1.0, x)); } // avoids clamp() overload ambiguity
 
@@ -248,6 +253,31 @@ vec3 shadePlanet(vec3 p, vec3 center) {
   return base * bands + vec3(0.02, 0.05, 0.10) * pow(lit, 8.0);
 }
 
+vec3 shadeHypergiant(vec3 p, vec3 center) {
+  vec3 n = normalize(p - center);
+  float turbulent = 0.55 + 0.45 * sin(n.x * 15.0 + uTime * 0.9)
+                    + 0.20 * sin(n.z * 25.0 - uTime * 1.6)
+                    + 0.10 * sin((n.x + n.y) * 70.0 + uTime * 4.0);
+  turbulent = clamp01(0.5 + 0.5 * turbulent);
+
+  vec3 deep = vec3(0.38, 0.03, 0.01);
+  vec3 bright = vec3(1.35, 0.20, 0.03);
+  vec3 col = mix(deep, bright, turbulent);
+
+  float simmer = 0.82 + 0.18 * sin(uTime * 2.8 + n.y * 20.0);
+  float collapseGlow = 1.0 + 0.7 * pow(clamp01(uCollapse), 3.0);
+  return col * simmer * collapseGlow;
+}
+
+vec3 shadeSupernova(vec3 p, vec3 center, float phase) {
+  vec3 n = normalize(p - center);
+  float flicker = 0.85 + 0.15 * sin(dot(n, vec3(13.0, 21.0, 8.0)) + uTime * 16.0);
+  vec3 core = vec3(7.0, 3.0, 0.8);
+  vec3 edge = vec3(1.5, 0.45, 0.1);
+  vec3 col = mix(edge, core, pow(phase, 0.6));
+  return col * flicker;
+}
+
 vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
   float r = length(p.xz);
   float azimuth = atan(p.z, p.x);
@@ -291,7 +321,41 @@ vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
 
 // Integrate u'' + u = 3 M u^2, where u=1/r, parameterized by phi (equatorial-plane reduction).
 vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
-  float M  = uM;
+  float collapse = clamp01(uCollapse);
+
+  vec3 starCenter = vec3(0.0);
+  float starRadius = mix(uStarRadiusStart, uStarRadiusEnd, collapse);
+  vec3 starRayEnd = camPos + rayDir * uFarR;
+
+  // Phase 1: red hypergiant (no black hole, no relativistic lensing yet).
+  if (collapse < kHypergiantEnd) {
+    vec3 starHitPos;
+    float starHitT;
+    bool hasStarHit = segmentHitsSphere(camPos, starRayEnd, starCenter, starRadius, starHitPos, starHitT);
+    if (hasStarHit) return vec4(shadeHypergiant(starHitPos, starCenter), 1.0);
+    return vec4(skyColor(rayDir, 0.0), 1.0);
+  }
+
+  // Phase 2: prolonged supernova + ejecta shell (still no black-hole lensing).
+  if (collapse < kSupernovaEnd) {
+    float snPhase = smoothstep(kHypergiantEnd, kSupernovaEnd, collapse);
+    float shellRadius = mix(starRadius, uStarRadiusStart * 1.8, snPhase);
+    float shellThickness = mix(0.90 * uM, 0.30 * uM, snPhase);
+
+    vec3 hitOuterPos, hitInnerPos;
+    float tOuter, tInner;
+    bool hitOuter = segmentHitsSphere(camPos, starRayEnd, starCenter, shellRadius, hitOuterPos, tOuter);
+    bool hitInner = segmentHitsSphere(camPos, starRayEnd, starCenter, max(shellRadius - shellThickness, 0.01), hitInnerPos, tInner);
+    if (hitOuter && (!hitInner || tOuter < tInner)) {
+      vec3 sn = shadeSupernova(hitOuterPos, starCenter, snPhase);
+      vec3 hyper = shadeHypergiant(hitOuterPos, starCenter);
+      return vec4(mix(hyper, sn, snPhase), 1.0);
+    }
+    return vec4(skyColor(rayDir, 0.0), 1.0);
+  }
+
+  float bhPhase = smoothstep(kSupernovaEnd, 1.0, collapse);
+  float M  = mix(0.22 * uM, uM, bhPhase);
   float rs = 2.0 * M;
 
   vec3 r0 = camPos;
@@ -354,7 +418,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     phi += h;
 
     if (u <= 0.0) {
-      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M));
+      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M)) * bhPhase;
       return vec4(skyColor(v, lensStrength), 1.0);
     }
 
@@ -371,7 +435,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     vec3 hitDiskPos, hitPlanetPos;
     float tDisk = 2.0;
     float tPlanet = 2.0;
-    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk);
+    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk) && bhPhase > 0.08;
     bool hasPlanet = segmentHitsSphere(posPrev, posNow, planetCenter, uPlanetRadius, hitPlanetPos, tPlanet);
 
     if (hasPlanet && (!hasDisk || tPlanet < tDisk)) {
@@ -380,7 +444,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
 
     if (hasDisk) {
       vec3 segDir = normalize(posNow - posPrev);
-      vec3 c = shadeDisk(hitDiskPos, segDir, M);
+      vec3 c = shadeDisk(hitDiskPos, segDir, M) * smoothstep(0.08, 0.95, bhPhase);
       return vec4(c, 1.0);
     }
     posPrev = posNow;
@@ -395,7 +459,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
       float dx = dr_dphi * c + rNow * (-s);
       float dy = dr_dphi * s + rNow * ( c);
       vec3 dirOut = normalize(a * dx + b * dy);
-      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M));
+      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M)) * bhPhase;
       return vec4(skyColor(dirOut, lensStrength), 1.0);
     }
   }
@@ -437,8 +501,184 @@ static const char* kFullscreenFS = R"(#version 430
 in vec2 vUV;
 out vec4 FragColor;
 uniform sampler2D uTex;
+uniform float uHudCollapse;
+const float kHypergiantEnd = 0.50;
+const float kSupernovaEnd = 0.78;
+
+float rectMask(vec2 uv, vec2 mn, vec2 mx) {
+  vec2 s = step(mn, uv) * step(uv, mx);
+  return s.x * s.y;
+}
+
+float ringMask(vec2 uv, vec2 c, float r0, float r1) {
+  float d = distance(uv, c);
+  return step(r0, d) * step(d, r1);
+}
+
+float charMask(vec2 p, int ch) {
+  float m = 0.0;
+  float t = 0.18;
+
+  // H
+  if (ch == 0) {
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(t, 1.00)));
+    m = max(m, rectMask(p, vec2(1.00 - t, 0.00), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.42), vec2(1.00, 0.58)));
+  }
+  // E
+  else if (ch == 1) {
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(t, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.82), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.42), vec2(0.85, 0.58)));
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(1.00, 0.18)));
+  }
+  // C
+  else if (ch == 2) {
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(t, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.82), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(1.00, 0.18)));
+  }
+  // O
+  else if (ch == 3) {
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(t, 1.00)));
+    m = max(m, rectMask(p, vec2(1.00 - t, 0.00), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.82), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(1.00, 0.18)));
+  }
+  // N
+  else if (ch == 4) {
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(t, 1.00)));
+    m = max(m, rectMask(p, vec2(1.00 - t, 0.00), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(0.26, 0.26)));
+    m = max(m, rectMask(p, vec2(0.20, 0.20), vec2(0.52, 0.52)));
+    m = max(m, rectMask(p, vec2(0.48, 0.48), vec2(0.80, 0.80)));
+    m = max(m, rectMask(p, vec2(0.74, 0.74), vec2(1.00, 1.00)));
+  }
+  // S
+  else if (ch == 5) {
+    m = max(m, rectMask(p, vec2(0.00, 0.82), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.42), vec2(1.00, 0.58)));
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(1.00, 0.18)));
+    m = max(m, rectMask(p, vec2(0.00, 0.42), vec2(t, 1.00)));
+    m = max(m, rectMask(p, vec2(1.00 - t, 0.00), vec2(1.00, 0.58)));
+  }
+  // I
+  else if (ch == 6) {
+    m = max(m, rectMask(p, vec2(0.00, 0.82), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.41, 0.00), vec2(0.59, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(1.00, 0.18)));
+  }
+  // F
+  else if (ch == 7) {
+    m = max(m, rectMask(p, vec2(0.00, 0.00), vec2(t, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.82), vec2(1.00, 1.00)));
+    m = max(m, rectMask(p, vec2(0.00, 0.42), vec2(0.85, 0.58)));
+  }
+  // /
+  else if (ch == 8) {
+    m = max(m, rectMask(p, vec2(0.65, 0.00), vec2(1.00, 0.25)));
+    m = max(m, rectMask(p, vec2(0.45, 0.20), vec2(0.80, 0.45)));
+    m = max(m, rectMask(p, vec2(0.25, 0.40), vec2(0.60, 0.65)));
+    m = max(m, rectMask(p, vec2(0.05, 0.60), vec2(0.40, 0.85)));
+  }
+  return m;
+}
+
+float labelMask3(vec2 uv, vec2 origin, float scale, int c0, int c1, int c2) {
+  float m = 0.0;
+  float spacing = scale * 0.20;
+
+  vec2 p0 = (uv - origin) / scale;
+  if (c0 >= 0) m = max(m, charMask(p0, c0));
+
+  vec2 p1 = (uv - (origin + vec2(scale + spacing, 0.0))) / scale;
+  if (c1 >= 0) m = max(m, charMask(p1, c1));
+
+  vec2 p2 = (uv - (origin + vec2((scale + spacing) * 2.0, 0.0))) / scale;
+  if (c2 >= 0) m = max(m, charMask(p2, c2));
+
+  return m;
+}
+
 void main() {
-  FragColor = texture(uTex, vUV);
+  vec3 col = texture(uTex, vUV).rgb;
+
+  float c = clamp(uHudCollapse, 0.0, 1.0);
+  vec2 hudMin = vec2(0.02, 0.04);
+  vec2 hudMax = vec2(0.30, 0.46);
+
+  float panel = rectMask(vUV, hudMin, hudMax);
+  if (panel > 0.5) {
+    vec3 panelCol = vec3(0.03, 0.035, 0.05);
+    col = mix(col, panelCol, 0.82);
+
+    // Progress bar: star life -> supernova -> black hole
+    vec2 p0 = hudMin + vec2(0.02, 0.035);
+    vec2 p1 = hudMax - vec2(0.02, 0.36);
+    float barBg = rectMask(vUV, p0, p1);
+    col = mix(col, vec3(0.12), 0.8 * barBg);
+    vec2 pf = vec2(mix(p0.x, p1.x, c), p1.y);
+    float barFill = rectMask(vUV, p0, pf);
+    vec3 lifeCol = mix(vec3(0.8, 0.2, 0.06), vec3(0.9, 0.85, 0.65), smoothstep(kHypergiantEnd, kSupernovaEnd, c));
+    lifeCol = mix(lifeCol, vec3(0.65, 0.82, 1.0), smoothstep(kSupernovaEnd, 1.0, c));
+    col = mix(col, lifeCol, 0.95 * barFill);
+
+    // Layer diagram (outer -> inner shells)
+    vec2 center = hudMin + vec2(0.14, 0.19);
+    float baseR = 0.125;
+    vec3 layerCols[6] = vec3[6](
+      vec3(0.95, 0.22, 0.08), // H shell
+      vec3(0.95, 0.58, 0.16), // He shell
+      vec3(0.70, 0.70, 0.74), // C/O
+      vec3(0.38, 0.72, 0.56), // Ne
+      vec3(0.42, 0.56, 0.95), // Si
+      vec3(0.76, 0.76, 0.80)  // Fe core
+    );
+
+    float fusionLayerIdx = 0.0;
+    if (c < 0.18) fusionLayerIdx = 0.0;
+    else if (c < 0.36) fusionLayerIdx = 1.0;
+    else if (c < 0.54) fusionLayerIdx = 2.0;
+    else if (c < 0.68) fusionLayerIdx = 3.0;
+    else if (c < kSupernovaEnd) fusionLayerIdx = 4.0;
+    else fusionLayerIdx = 5.0;
+
+    for (int i = 0; i < 6; i++) {
+      float o = float(i) * 0.018;
+      float m = ringMask(vUV, center, baseR - o - 0.0175, baseR - o);
+      float layerHighlight = 1.0 - step(0.5, abs(float(i) - fusionLayerIdx));
+      float pulse = 0.75 + 0.25 * sin(40.0 * vUV.x + 30.0 * vUV.y + c * 30.0);
+      vec3 lc = layerCols[i] * (1.0 + 0.45 * layerHighlight * pulse);
+      col = mix(col, lc, m * 0.96);
+    }
+
+    // Layer legend bars (top=outer layers, bottom=core)
+    vec2 l0 = hudMin + vec2(0.19, 0.11);
+    for (int i = 0; i < 6; i++) {
+      float y = l0.y + float(i) * 0.042;
+      vec2 a = vec2(l0.x, y);
+      vec2 b = vec2(l0.x + 0.08, y + 0.026);
+      float lm = rectMask(vUV, a, b);
+      float layerHighlight = 1.0 - step(0.5, abs(float(i) - fusionLayerIdx));
+      vec3 lc = layerCols[i] * (0.85 + 0.5 * layerHighlight);
+      col = mix(col, lc, lm);
+
+      int c0 = 0, c1 = -1, c2 = -1;
+      if (i == 0) { c0 = 0; }                 // H
+      else if (i == 1) { c0 = 0; c1 = 1; }    // HE
+      else if (i == 2) { c0 = 2; c1 = 8; c2 = 3; } // C/O
+      else if (i == 3) { c0 = 4; c1 = 1; }    // NE
+      else if (i == 4) { c0 = 5; c1 = 6; }    // SI
+      else { c0 = 7; c1 = 1; }                // FE
+
+      vec2 txtOrigin = vec2(l0.x + 0.084, y + 0.003);
+      float txtMask = labelMask3(vUV, txtOrigin, 0.009, c0, c1, c2);
+      vec3 txtCol = mix(vec3(0.82), lc, 0.45);
+      col = mix(col, txtCol, txtMask);
+    }
+  }
+
+  FragColor = vec4(col, 1.0);
 }
 )";
 
@@ -507,9 +747,13 @@ int main() {
   GLint uPlanetRadius = ul(compProg, "uPlanetRadius");
   GLint uPlanetOmega  = ul(compProg, "uPlanetOmega");
   GLint uPlanetY      = ul(compProg, "uPlanetY");
+  GLint uCollapse     = ul(compProg, "uCollapse");
+  GLint uStarRadiusStart = ul(compProg, "uStarRadiusStart");
+  GLint uStarRadiusEnd   = ul(compProg, "uStarRadiusEnd");
 
   // Uniform location (blit)
   GLint uTex = ul(blitProg, "uTex");
+  GLint uHudCollapse = ul(blitProg, "uHudCollapse");
 
   // Timing for consistent movement speed
   double lastT = glfwGetTime();
@@ -572,6 +816,8 @@ int main() {
     glUniformMatrix3fv(uCamBasis, 1, GL_FALSE, basis);
     glUniform1f(uFovY, 55.0f);
 
+    float collapse = std::min((float)(now / 42.0), 1.0f);
+
     glUniform1f(uM, M);
     glUniform1f(uPhiStep, 0.0026f);    // nicer near strong lensing
     glUniform1i(uMaxSteps, 12000);     // allow more loops -> more arcs
@@ -587,6 +833,9 @@ int main() {
     glUniform1f(uPlanetRadius, 1.35f * M);
     glUniform1f(uPlanetOmega, 0.20f);
     glUniform1f(uPlanetY, 0.8f * M);
+    glUniform1f(uCollapse, collapse);
+    glUniform1f(uStarRadiusStart, 7.0f * M);
+    glUniform1f(uStarRadiusEnd, 1.6f * M);
 
     glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
 
@@ -600,6 +849,7 @@ int main() {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(uTex, 0);
+    glUniform1f(uHudCollapse, collapse);
 
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
