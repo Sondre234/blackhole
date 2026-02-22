@@ -147,6 +147,9 @@ uniform float uPlanetOrbitR;
 uniform float uPlanetRadius;
 uniform float uPlanetOmega;
 uniform float uPlanetY;
+uniform float uCollapse;
+uniform float uStarRadiusStart;
+uniform float uStarRadiusEnd;
 
 const float PI = 3.141592653589793;
 
@@ -248,6 +251,22 @@ vec3 shadePlanet(vec3 p, vec3 center) {
   return base * bands + vec3(0.02, 0.05, 0.10) * pow(lit, 8.0);
 }
 
+vec3 shadeHypergiant(vec3 p, vec3 center) {
+  vec3 n = normalize(p - center);
+  float turbulent = 0.55 + 0.45 * sin(n.x * 15.0 + uTime * 0.9)
+                    + 0.20 * sin(n.z * 25.0 - uTime * 1.6)
+                    + 0.10 * sin((n.x + n.y) * 70.0 + uTime * 4.0);
+  turbulent = clamp01(0.5 + 0.5 * turbulent);
+
+  vec3 deep = vec3(0.38, 0.03, 0.01);
+  vec3 bright = vec3(1.35, 0.20, 0.03);
+  vec3 col = mix(deep, bright, turbulent);
+
+  float simmer = 0.82 + 0.18 * sin(uTime * 2.8 + n.y * 20.0);
+  float collapseGlow = 1.0 + 1.6 * pow(clamp01(uCollapse), 4.0);
+  return col * simmer * collapseGlow;
+}
+
 vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
   float r = length(p.xz);
   float azimuth = atan(p.z, p.x);
@@ -291,8 +310,20 @@ vec3 shadeDisk(vec3 p, vec3 segDir, float M) {
 
 // Integrate u'' + u = 3 M u^2, where u=1/r, parameterized by phi (equatorial-plane reduction).
 vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
-  float M  = uM;
+  float collapse = clamp01(uCollapse);
+  float M  = mix(0.05 * uM, uM, collapse);
   float rs = 2.0 * M;
+
+  vec3 starCenter = vec3(0.0);
+  float starRadius = mix(uStarRadiusStart, uStarRadiusEnd, collapse);
+
+  vec3 starHitPos;
+  float starHitT;
+  vec3 starRayEnd = camPos + rayDir * uFarR;
+  bool hasStarHit = segmentHitsSphere(camPos, starRayEnd, starCenter, starRadius, starHitPos, starHitT);
+  if (hasStarHit && collapse < 0.985) {
+    return vec4(shadeHypergiant(starHitPos, starCenter), 1.0);
+  }
 
   vec3 r0 = camPos;
   float rObs = length(r0);
@@ -371,7 +402,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     vec3 hitDiskPos, hitPlanetPos;
     float tDisk = 2.0;
     float tPlanet = 2.0;
-    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk);
+    bool hasDisk = segmentHitsDisk(posPrev, posNow, hitDiskPos, tDisk) && collapse > 0.35;
     bool hasPlanet = segmentHitsSphere(posPrev, posNow, planetCenter, uPlanetRadius, hitPlanetPos, tPlanet);
 
     if (hasPlanet && (!hasDisk || tPlanet < tDisk)) {
@@ -380,7 +411,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
 
     if (hasDisk) {
       vec3 segDir = normalize(posNow - posPrev);
-      vec3 c = shadeDisk(hitDiskPos, segDir, M);
+      vec3 c = shadeDisk(hitDiskPos, segDir, M) * smoothstep(0.35, 0.90, collapse);
       return vec4(c, 1.0);
     }
     posPrev = posNow;
@@ -507,6 +538,9 @@ int main() {
   GLint uPlanetRadius = ul(compProg, "uPlanetRadius");
   GLint uPlanetOmega  = ul(compProg, "uPlanetOmega");
   GLint uPlanetY      = ul(compProg, "uPlanetY");
+  GLint uCollapse     = ul(compProg, "uCollapse");
+  GLint uStarRadiusStart = ul(compProg, "uStarRadiusStart");
+  GLint uStarRadiusEnd   = ul(compProg, "uStarRadiusEnd");
 
   // Uniform location (blit)
   GLint uTex = ul(blitProg, "uTex");
@@ -572,6 +606,8 @@ int main() {
     glUniformMatrix3fv(uCamBasis, 1, GL_FALSE, basis);
     glUniform1f(uFovY, 55.0f);
 
+    float collapse = std::min((float)(now / 18.0), 1.0f);
+
     glUniform1f(uM, M);
     glUniform1f(uPhiStep, 0.0026f);    // nicer near strong lensing
     glUniform1i(uMaxSteps, 12000);     // allow more loops -> more arcs
@@ -587,6 +623,9 @@ int main() {
     glUniform1f(uPlanetRadius, 1.35f * M);
     glUniform1f(uPlanetOmega, 0.20f);
     glUniform1f(uPlanetY, 0.8f * M);
+    glUniform1f(uCollapse, collapse);
+    glUniform1f(uStarRadiusStart, 7.0f * M);
+    glUniform1f(uStarRadiusEnd, 1.6f * M);
 
     glBindImageTexture(0, tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
 
