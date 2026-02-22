@@ -414,7 +414,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
     phi += h;
 
     if (u <= 0.0) {
-      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M));
+      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M)) * bhPhase;
       return vec4(skyColor(v, lensStrength), 1.0);
     }
 
@@ -455,7 +455,7 @@ vec4 traceSchwarzschild(vec3 camPos, vec3 rayDir) {
       float dx = dr_dphi * c + rNow * (-s);
       float dy = dr_dphi * s + rNow * ( c);
       vec3 dirOut = normalize(a * dx + b * dy);
-      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M));
+      float lensStrength = clamp01((12.0 * M - minR) / (10.0 * M)) * bhPhase;
       return vec4(skyColor(dirOut, lensStrength), 1.0);
     }
   }
@@ -497,8 +497,84 @@ static const char* kFullscreenFS = R"(#version 430
 in vec2 vUV;
 out vec4 FragColor;
 uniform sampler2D uTex;
+uniform float uHudCollapse;
+
+float rectMask(vec2 uv, vec2 mn, vec2 mx) {
+  vec2 s = step(mn, uv) * step(uv, mx);
+  return s.x * s.y;
+}
+
+float ringMask(vec2 uv, vec2 c, float r0, float r1) {
+  float d = distance(uv, c);
+  return step(r0, d) * step(d, r1);
+}
+
 void main() {
-  FragColor = texture(uTex, vUV);
+  vec3 col = texture(uTex, vUV).rgb;
+
+  float c = clamp(uHudCollapse, 0.0, 1.0);
+  vec2 hudMin = vec2(0.02, 0.04);
+  vec2 hudMax = vec2(0.30, 0.46);
+
+  float panel = rectMask(vUV, hudMin, hudMax);
+  if (panel > 0.5) {
+    vec3 panelCol = vec3(0.03, 0.035, 0.05);
+    col = mix(col, panelCol, 0.82);
+
+    // Progress bar: star life -> supernova -> black hole
+    vec2 p0 = hudMin + vec2(0.02, 0.035);
+    vec2 p1 = hudMax - vec2(0.02, 0.36);
+    float barBg = rectMask(vUV, p0, p1);
+    col = mix(col, vec3(0.12), 0.8 * barBg);
+    vec2 pf = vec2(mix(p0.x, p1.x, c), p1.y);
+    float barFill = rectMask(vUV, p0, pf);
+    vec3 lifeCol = mix(vec3(0.8, 0.2, 0.06), vec3(0.9, 0.85, 0.65), smoothstep(0.50, 0.78, c));
+    lifeCol = mix(lifeCol, vec3(0.65, 0.82, 1.0), smoothstep(0.78, 1.0, c));
+    col = mix(col, lifeCol, 0.95 * barFill);
+
+    // Layer diagram (outer -> inner shells)
+    vec2 center = hudMin + vec2(0.14, 0.19);
+    float baseR = 0.125;
+    vec3 layerCols[6] = vec3[6](
+      vec3(0.95, 0.22, 0.08), // H shell
+      vec3(0.95, 0.58, 0.16), // He shell
+      vec3(0.70, 0.70, 0.74), // C/O
+      vec3(0.38, 0.72, 0.56), // Ne
+      vec3(0.42, 0.56, 0.95), // Si
+      vec3(0.76, 0.76, 0.80)  // Fe core
+    );
+
+    float active = 0.0;
+    if (c < 0.18) active = 0.0;
+    else if (c < 0.36) active = 1.0;
+    else if (c < 0.54) active = 2.0;
+    else if (c < 0.68) active = 3.0;
+    else if (c < 0.78) active = 4.0;
+    else active = 5.0;
+
+    for (int i = 0; i < 6; i++) {
+      float o = float(i) * 0.018;
+      float m = ringMask(vUV, center, baseR - o - 0.0175, baseR - o);
+      float isActive = 1.0 - step(0.5, abs(float(i) - active));
+      float pulse = 0.75 + 0.25 * sin(40.0 * vUV.x + 30.0 * vUV.y + c * 30.0);
+      vec3 lc = layerCols[i] * (1.0 + 0.45 * isActive * pulse);
+      col = mix(col, lc, m * 0.96);
+    }
+
+    // Layer legend bars (top=outer layers, bottom=core)
+    vec2 l0 = hudMin + vec2(0.19, 0.11);
+    for (int i = 0; i < 6; i++) {
+      float y = l0.y + float(i) * 0.042;
+      vec2 a = vec2(l0.x, y);
+      vec2 b = vec2(l0.x + 0.08, y + 0.026);
+      float lm = rectMask(vUV, a, b);
+      float isActive = 1.0 - step(0.5, abs(float(i) - active));
+      vec3 lc = layerCols[i] * (0.85 + 0.5 * isActive);
+      col = mix(col, lc, lm);
+    }
+  }
+
+  FragColor = vec4(col, 1.0);
 }
 )";
 
@@ -573,6 +649,7 @@ int main() {
 
   // Uniform location (blit)
   GLint uTex = ul(blitProg, "uTex");
+  GLint uHudCollapse = ul(blitProg, "uHudCollapse");
 
   // Timing for consistent movement speed
   double lastT = glfwGetTime();
@@ -668,6 +745,7 @@ int main() {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(uTex, 0);
+    glUniform1f(uHudCollapse, collapse);
 
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
